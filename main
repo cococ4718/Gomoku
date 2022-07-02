@@ -1,0 +1,534 @@
+import numpy as np
+import pygame
+import pygame_menu
+import gym
+from gym import spaces
+import os
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
+from sb3_contrib.common.wrappers import ActionMasker
+from sb3_contrib.ppo_mask import MaskablePPO
+
+
+pygame.init()
+
+nbr_squares = 15
+l_square = 60
+l_edge = 25
+l_heading = 95
+r_pawn = 20
+l_board = (nbr_squares - 1) * l_square + 2 * l_edge
+h_board = (nbr_squares - 1) * l_square + l_heading + l_edge
+l_menu = 500
+h_menu = 500
+beige = (241, 188, 105)
+
+board = np.zeros((nbr_squares, nbr_squares), dtype=np.byte)
+observation = np.zeros((225,), dtype=np.byte)
+surface = pygame.display.set_mode((l_menu, h_menu))
+font = pygame.font.Font('freesansbold.ttf', 33)
+player = 1
+start_game = False
+game = True
+variant = 'Normale'
+run = True
+end = False
+last_move = ''
+score = 0
+
+
+def victory(current_board, last_move_played):
+    x = last_move_played[0]
+    y = last_move_played[1]
+    for i in range(x - 4, x + 1):
+        if i < 0:
+            continue
+        if i <= nbr_squares - 5:
+            if 0 != current_board[i, y] == current_board[i + 1, y] == current_board[i + 2, y] == current_board[i + 3, y] == current_board[i + 4, y]:
+                if variant == 'Freestyle':
+                    return True
+                elif i == 0:  # la suite commence en haut
+                    if current_board[i + 5, y] != current_board[i, y]:
+                        return True
+                elif i == nbr_squares - 5:  # la suite finit en bas
+                    if current_board[i - 1, y] != current_board[i, y]:
+                        return True
+                elif current_board[i + 5, y] != current_board[i, y] != current_board[i - 1, y]:
+                    return True
+    for j in range(y - 4, y + 1):
+        if j < 0:
+            continue
+        if j <= nbr_squares - 5:
+            if 0 != current_board[x, j] == current_board[x, j + 1] == current_board[x, j + 2] == current_board[x, j + 3] == current_board[x, j + 4]:
+                if variant == 'Freestyle':
+                    return True
+                elif j == 0:  # cas la suite commence à gauche
+                    if current_board[x, j + 5] != current_board[x, j]:
+                        return True
+                elif j == nbr_squares - 5:  # la suite finit a droite
+                    if current_board[x, j - 1] != current_board[x, j]:
+                        return True
+                elif current_board[x, j + 5] != current_board[x, j] != current_board[x, j - 1]:
+                    return True
+    for k in range(5):
+        i = x - k
+        j = y - k
+        if i < 0 or j < 0:
+            continue
+        if i <= nbr_squares - 5 and j <= nbr_squares - 5:
+            if 0 != current_board[i, j] == current_board[i + 1, j + 1] == current_board[i + 2, j + 2] == current_board[i + 3, j + 3] == current_board[i + 4, j + 4]:
+                if variant == 'Freestyle':
+                    return True
+                elif (i == nbr_squares - 5 and j == 0) or (i == 0 and j == nbr_squares - 5):  # la diagonale en bas a gauche ou en haut a droite
+                    return True
+                elif i == 0 or j == 0:  # la diagonale commence en haut ou a gauche
+                    if current_board[i + 5, j + 5] != current_board[i + 4, j + 4]:
+                        return True
+                elif i == nbr_squares - 5 or j == nbr_squares - 5:  # la diagonale finit en bas ou a droite
+                    if current_board[i - 1, j - 1] != current_board[i, j]:
+                        return True
+                elif current_board[i + 5, j + 5] != current_board[i + 4, j + 4] != current_board[i - 1, j - 1]:
+                    return True
+    for k in range(5):
+        i = x - 4 + k
+        j = y - k
+        if i < 0 or j < 0:
+            continue
+        if i <= nbr_squares - 5 and j <= nbr_squares - 5:
+            if 0 != current_board[i + 4, j] == current_board[i + 3, j + 1] == current_board[i + 2, j + 2] == current_board[i + 1, j + 3] == current_board[i, j + 4]:
+                if variant == 'Freestyle':
+                    return True
+                elif (i == 0 and j == 0) or (i == nbr_squares - 5 and j == nbr_squares - 5):  # la diagonale en haut a gauche ou en bas a droite
+                    return True
+                elif j == 0 or i == nbr_squares - 5:  # la diagonale commence en bas ou a gauche
+                    if current_board[i - 1, j + 5] != current_board[i, j + 4]:
+                        return True
+                elif i == 0 or j == nbr_squares - 5:  # la diagonale finit en haut ou a droite
+                    if current_board[i + 5, j - 1] != current_board[i + 4, j]:
+                        return True
+                elif current_board[i + 5, j - 1] != current_board[i + 4, j] != current_board[i - 1, j + 5]:
+                    return True
+    return False
+
+
+def draw_board():
+    surface.fill(beige)
+    for i in range(nbr_squares):
+        pygame.draw.line(surface, (0, 0, 0), (l_square * i + l_edge, l_heading),
+                         (l_square * i + l_edge, h_board - l_edge))  # verticales
+    for i in range(nbr_squares):
+        pygame.draw.line(surface, (0, 0, 0), (l_edge, l_square * i + l_heading),
+                         (l_board - l_edge, l_square * i + l_heading))  # horizontales
+
+
+def menu_start():
+    global start_game, l_board, h_board, board, surface, run, game
+    l_board = (nbr_squares - 1) * l_square + 2 * l_edge
+    h_board = (nbr_squares - 1) * l_square + l_heading + l_edge
+    board = np.zeros((nbr_squares, nbr_squares), dtype=np.byte)
+    surface = pygame.display.set_mode((l_board, h_board))
+    start_game = True
+    game = True
+    run = True
+    menu.disable()
+    menu_2.disable()
+    draw_board()
+
+
+def menu_computer_start():
+    global start_game, l_board, h_board, board, surface, run, game, variant, nbr_squares
+    nbr_squares = 15
+    nbr_squares = 15
+    l_board = 14 * l_square + 2 * l_edge
+    h_board = 14 * l_square + l_heading + l_edge
+    board = np.zeros((15, 15), dtype=np.byte)
+    surface = pygame.display.set_mode((l_board, h_board))
+    start_game = True
+    game = True
+    run = True
+    variant = 'ordi'
+    menu.disable()
+    menu_2.disable()
+    draw_board()
+
+
+def menu_variant(value, _):
+    global variant
+    variant = (value[0])[0].strip()
+
+
+def second_menu():
+    menu.close()
+    menu_2.mainloop(surface)
+
+
+def menu_set_nbr_squares(size):
+    global nbr_squares
+    if size.isdigit():
+        nbr_squares = int(size)
+
+
+def menu_set_square_size(taille):
+    global l_square, r_pawn
+    if taille.isdigit():
+        l_square = int(taille)
+        r_pawn = int(taille) // 3
+
+
+def first_menu():
+    menu_2.close()
+    menu.mainloop(surface)
+
+
+menu = pygame_menu.Menu('Bienvenue', l_menu, h_menu, theme=pygame_menu.themes.THEME_SOLARIZED)
+menu.add.button('Jouer', menu_start)
+menu.add.button("Jouer contre l'ordi", menu_computer_start)
+menu.add.selector('Mode : ', [('Normale ', 1), ('Freestyle', 2), ('     Pro     ', 3), ('Long Pro ', 4), ('   Swap    ', 5), ('  Swap2   ', 6)], onchange=menu_variant)
+menu.add.button('Paramètres', second_menu)
+menu.add.button('Quitter', pygame_menu.events.EXIT)
+
+menu_2 = pygame_menu.Menu('Paramètres', l_menu, h_menu, theme=pygame_menu.themes.THEME_SOLARIZED)
+menu_2.add.text_input('Taille du plateau : ', default=15, onchange=menu_set_nbr_squares)
+menu_2.add.text_input('Taille de la case : ', default=60, onchange=menu_set_square_size)
+menu_2.add.button('Jouer', menu_start)
+menu_2.add.button('Retour', first_menu)
+
+pygame.display.set_caption('Gomoku')
+
+
+def display(sentence):
+    text = font.render(sentence, True, (0, 0, 0), beige)
+    surface.fill(beige, (0, 0, l_board, l_heading - l_square // 2))
+    text_rect = text.get_rect()
+    text_rect.center = (l_board // 2, l_heading // 2)
+    surface.blit(text, text_rect)
+
+
+def mouse_in_board():
+    if position[0] < l_edge - l_square // 2:
+        return False
+    elif position[0] > l_board - l_edge + l_square // 2:
+        return False
+    elif position[1] < l_heading - l_square // 2:
+        return False
+    elif position[1] > h_board - l_edge + l_square // 2:
+        return False
+    return True
+
+
+def draw_pawn(current_player, current_coordinates):
+    if current_player == 1:
+        pygame.draw.circle(surface, (0, 0, 0), (current_coordinates[1] * l_square + l_edge, current_coordinates[0] * l_square + l_heading), r_pawn, r_pawn)
+    else:
+        pygame.draw.circle(surface, (255, 255, 255), (current_coordinates[1] * l_square + l_edge, current_coordinates[0] * l_square + l_heading), r_pawn, r_pawn)
+
+
+def number_moves():
+    total = 0
+    for i in range(nbr_squares):
+        for j in range(nbr_squares):
+            total += abs(board[i, j])
+    return total
+
+
+def return_last_move():
+    if last_move != '' and board[last_move] != 0:
+        global player, game
+        board[last_move] = 0
+        game = True
+        if player == 1:
+            display('Tour aux Blancs')
+            player = -1
+            pygame.draw.circle(surface, beige, (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading), r_pawn, r_pawn)
+            pygame.draw.line(surface, (0, 0, 0), (int(last_move[1]) * l_square + l_edge - r_pawn, int(last_move[0]) * l_square + l_heading), (int(last_move[1]) * l_square + l_edge + r_pawn, int(last_move[0]) * l_square + l_heading))
+            pygame.draw.line(surface, (0, 0, 0), (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading - r_pawn), (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading + r_pawn))
+        else:
+            display('Tour aux Noirs')
+            player = 1
+            pygame.draw.circle(surface, beige, (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading), r_pawn, r_pawn)
+            pygame.draw.line(surface, (0, 0, 0), (int(last_move[1]) * l_square + l_edge - r_pawn, int(last_move[0]) * l_square + l_heading), (int(last_move[1]) * l_square + l_edge + r_pawn, int(last_move[0]) * l_square + l_heading))
+            pygame.draw.line(surface, (0, 0, 0), (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading - r_pawn), (int(last_move[1]) * l_square + l_edge, int(last_move[0]) * l_square + l_heading + r_pawn))
+
+
+def reset():
+    global surface, start_game, run, menu, menu_2, player
+    menu.enable()
+    menu_2.enable()
+    surface = pygame.display.set_mode((l_menu, h_menu))
+    start_game = False
+    run = False
+    player = 1
+
+
+class Environment(gym.Env):
+    metadata = {'render.modes': ['human']}
+
+    def __init__(self):
+        super(Environment, self).__init__()
+        self.action_space = spaces.Discrete(225)
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(225,), dtype=np.byte)
+        self.observation = np.zeros((225,), dtype=np.byte)
+
+    def __getitem__(self, action):
+        return self.observation[action]
+
+    def step(self, action):
+        self.numbers = np.array(tuple(range(225)))[action]
+        self.coordinates = (self.numbers // 15, self.numbers % 15)
+        self.observation[action] = -1
+        self.board[self.coordinates] = -1
+        if victory(self.board, self.coordinates):
+            self.reward = 1
+            self.done = True
+        else:
+            self.reward = 0
+            prediction = opponent.predict(self.observation * -1, action_masks=env.valid_action_mask(env)(self.observation))
+            self.observation[prediction] = 1
+            self.numbers = np.array(tuple(range(225)))[prediction][0]
+            self.coordinates = (self.numbers // 15, self.numbers % 15)
+            self.board[self.coordinates] = 1
+            if victory(self.board, self.coordinates):
+                self.reward = -1
+                self.done = True
+        if 0 not in self.observation:
+            self.done = True
+        info = {}
+        if self.done:
+            global score
+            score += self.reward
+        return self.observation, self.reward, self.done, info
+
+    def reset(self):
+        self.done = False
+        self.observation = np.zeros((225,), dtype=np.byte)
+        self.board = np.zeros((15, 15), dtype=np.byte)
+        prediction = opponent.predict(self.observation, action_masks=env.valid_action_mask(env)(self.observation))
+        self.observation[prediction] = 1
+        self.numbers = np.array(tuple(range(225)))[prediction]
+        self.coordinates = (self.numbers // 15, self.numbers % 15)
+        self.board[self.coordinates] = 1
+        return self.observation  # reward, done, info can't be included
+
+    def render(self, mode="human"):
+        global l_board, h_board, board, surface, nbr_squares
+        nbr_squares = 15
+        nbr_squares = 15
+        l_board = 14 * l_square + 2 * l_edge
+        h_board = 14 * l_square + l_heading + l_edge
+        board = np.zeros((15, 15), dtype=np.byte)
+        surface = pygame.display.set_mode((l_board, h_board))
+        draw_board()
+        for i in range(15):
+            for j in range(15):
+                if self.board[i, j] == 1:
+                    draw_pawn(1, (i, j))
+                elif self.board[i, j] == -1:
+                    draw_pawn(-1, (i, j))
+        pygame.display.flip()
+
+    def valid_action_mask(self, env: gym.Env):
+        return action_mask
+
+    def observation(self):
+        return self.observation
+
+
+def action_mask(env: gym.Env):
+    possible_actions = np.zeros((225,), dtype=np.byte)
+    for action in range(225):
+        if env[action] == 0:
+            possible_actions[action] = True
+        else:
+            possible_actions[action] = False
+    return possible_actions
+
+
+env = Environment()
+env = ActionMasker(env, env.valid_action_mask(env))
+
+opponent = MaskablePPO.load("Models/MaskablePPO_39/270000", env=env)
+env.reset()
+
+while True:
+    menu.mainloop(surface)
+    if start_game:
+
+        if variant == 'Normale' or variant == 'Freestyle':
+            display('Tour aux Noirs')
+
+        elif variant == 'Pro' or variant == 'Long Pro':
+            board[nbr_squares // 2, nbr_squares // 2] = 1
+            draw_pawn(1, (nbr_squares // 2, nbr_squares // 2))
+            player = -1
+            display('Tour aux Blancs')
+            if variant == 'Pro':
+                distance = 2
+            else:
+                distance = 3
+            while number_moves() < 3 and run:
+                pygame.display.flip()
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        run = False
+                        end = True
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_z:
+                            return_last_move()
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        if pygame.mouse.get_pressed() == (1, 0, 0):
+                            position = pygame.mouse.get_pos()
+                            if not mouse_in_board():
+                                continue
+                            coordinates = ((position[1] - l_heading + l_square // 2) // l_square, (position[0] - l_edge + l_square // 2) // l_square)
+                            if board[coordinates] == 0:
+                                if number_moves() == 2:
+                                    if abs(coordinates[0] - nbr_squares // 2) > distance or abs(coordinates[1] - nbr_squares // 2) > distance:
+                                        draw_pawn(1, coordinates)
+                                        last_move = coordinates
+                                        board[coordinates] = 1
+                                        player = -1
+                                        display('Tour aux Blancs')
+                                if number_moves() == 1:
+                                    board[coordinates] = -1
+                                    draw_pawn(-1, coordinates)
+                                    last_move = coordinates
+                                    player = 1
+                                    display('Tour aux Noirs')
+
+        elif variant == 'Swap' or variant == 'Swap2':
+            display('Au premier joueur de placer 3 pions')
+            while number_moves() < 3 and run:
+                pygame.display.flip()
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        run = False
+                        end = True
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_z:
+                            return_last_move()
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        if pygame.mouse.get_pressed() == (1, 0, 0):
+                            position = pygame.mouse.get_pos()
+                            if not mouse_in_board():
+                                continue
+                            coordinates = ((position[1] - l_heading + l_square // 2) // l_square, (position[0] - l_edge + l_square // 2) // l_square)
+                            if board[coordinates] == 0:
+                                board[coordinates] = player
+                                draw_pawn(player, coordinates)
+                                last_move = coordinates
+                                player *= -1
+            display('Au deuxième joueur de choisir')
+
+        elif variant == 'ordi':
+            display('Tour aux Noirs')
+            while run:
+                pygame.display.flip()
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        run = False
+                        end = True
+                    if event.type == pygame.KEYDOWN:
+                        #if event.key == pygame.K_z:
+                        #    return_last_move()
+                        if event.key == pygame.K_RETURN:
+                            reset()
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        if game:
+                            if pygame.mouse.get_pressed() == (1, 0, 0):
+                                position = pygame.mouse.get_pos()
+                                if not mouse_in_board():
+                                    continue
+                                coordinates = ((position[1] - l_heading + l_square // 2) // l_square,
+                                               (position[0] - l_edge + l_square // 2) // l_square)
+                                if board[coordinates] == 0:
+                                    board[coordinates] = 1
+                                    observation[coordinates[0] * 15 + coordinates[1]] = 1
+                                    draw_pawn(1, coordinates)
+                                    #last_move = coordinates
+                                    if victory(board, coordinates):
+                                        display('Les Noirs ont gagné!')
+                                        game = False
+                                        continue
+                                    elif 0 not in board:
+                                        display('Nulle!')
+                                        game = False
+                                        continue
+                                    else:
+                                        move = opponent.predict(observation * -1, action_masks=env.valid_action_mask(env)(observation))
+                                        move = np.array(tuple(range(225)))[move][0]
+                                        observation[move] = -1
+                                        coordinates = (move // 15, move % 15)
+                                        board[coordinates] = -1
+                                        draw_pawn(-1, coordinates)
+                                        if victory(board, coordinates):
+                                            display("L'ordi a gagné!")
+                                            game = False
+                                            continue
+                                        display('Tour aux Noirs')
+
+        while run:
+            pygame.display.flip()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    run = False
+                    end = True
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_z:
+                        return_last_move()
+                    if event.key == pygame.K_RETURN:
+                        reset()
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if game:
+                        if pygame.mouse.get_pressed() == (1, 0, 0):
+                            position = pygame.mouse.get_pos()
+                            if not mouse_in_board():
+                                continue
+                            coordinates = ((position[1] - l_heading + l_square // 2) // l_square, (position[0] - l_edge + l_square // 2) // l_square)
+                            if board[coordinates] == 0:
+                                board[coordinates] = player
+                                draw_pawn(player, coordinates)
+                                last_move = coordinates
+                                if victory(board, coordinates):
+                                    if player == 1:
+                                        display('Les Noirs ont gagné!')
+                                    else:
+                                        display('Les Blancs ont gagné!')
+                                    game = False
+                                    continue
+                                if 0 not in board:
+                                    display('Nulle!')
+                                    game = False
+                                    continue
+                                player *= -1
+                                if player == -1:
+                                    display('Tour aux Blancs')
+                                else:
+                                    display('Tour aux Noirs')
+        if end:
+            break
+
+pygame.quit()
+
+timestep = 10000
+index = 40
+logdir = "logs"
+while True:
+    model = opponent
+    models_dir = "models/MaskablePPO_" + str(index)
+    if not os.path.exists(models_dir):
+        os.makedirs(models_dir)
+    for i in range(1, 51):
+        model.learn(total_timesteps=timestep, reset_num_timesteps=False, tb_log_name="MaskablePPO_" + str(index))
+        model.save(f"{models_dir}/{timestep * i}")
+    index += 1
+    opponent = MaskablePPO.load(f"{models_dir}/{timestep * 50}", env=env)
+    env.reset()
+
+# match vs random agent
+#model = MaskablePPO(MaskableActorCriticPolicy, env, verbose=1)
+#for _ in range(1000):
+#    done = False
+#    obs = env.reset()
+#    while not done:
+#        #env.render()
+#        obs, reward, done, info = env.step(model.predict(obs)[0])
+#print(score)
